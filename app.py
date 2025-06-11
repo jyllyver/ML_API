@@ -1,62 +1,66 @@
-# Import necessary modules from Flask
 from flask import Flask, request, jsonify
-from flask_cors import CORS # Import Flask-CORS
+from flask_cors import CORS
 import os
+import numpy as np
+from PIL import Image
+import tensorflow as tf
 
-# Initialize the Flask application
+# Setup Flask app
 app = Flask(__name__)
-
-# Enable CORS for all routes.
-# In a production environment, you might want to restrict this to specific origins (e.g., CORS(app, origins="http://yourfrontend.com")).
-# For development, allowing all origins ('*') is convenient.
 CORS(app)
 
-# Define the folder where uploaded images will be saved
 UPLOAD_FOLDER = 'uploads'
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER) # Create the folder if it doesn't exist
-
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Define a route that will handle image uploads
-# This route will only accept POST requests.
+# Load TFLite model
+interpreter = tf.lite.Interpreter(model_path="ML_models/waste_classifier_resnet50.tflite")
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Labels and descriptions
+labels = ["bio", "nonbio"]
+descriptions = {
+    "bio": "Biodegradable waste such as food scraps, paper, and natural materials.",
+    "nonbio": "Non-biodegradable waste like plastics, metals, and synthetic materials."
+}
+
+def preprocess_image(image_path):
+    img = Image.open(image_path).convert('RGB')
+    img = img.resize((224, 224))  # adjust size if your model requires a different one
+    img_array = np.array(img, dtype=np.float32) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)  # batch dimension
+    return img_array
+
 @app.route('/upload_image', methods=['POST'])
 def upload_image():
-    # Check if the 'image' file is present in the request.
-    # The 'image' key is the name of the input field in the form or the key
-    # in the multipart/form-data request body that contains the file.
     if 'image' not in request.files:
-        # If no file is found with the 'image' key, return an error message.
         return jsonify({"message": "No image file part in the request"}), 400
 
     image_file = request.files['image']
-
-    # If the user does not select a file, the browser submits an empty file
-    # without a filename. We should handle this case.
     if image_file.filename == '':
         return jsonify({"message": "No selected image file"}), 400
 
-    # If an image file is present and has a filename, proceed to save it.
-    if image_file:
-        # Securely save the file. For a real application, you might want
-        # to use `werkzeug.utils.secure_filename` to sanitize the filename.
-        # For this example, we'll just save it directly.
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], image_file.filename)
-        image_file.save(filepath)
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], image_file.filename)
+    image_file.save(filepath)
 
-        # Return a success message indicating the image was received.
-        # You can include the filename and path for confirmation.
-        return jsonify({
-            "message": "Image received successfully!",
-            "filename": image_file.filename,
-            "filepath": filepath
-        }), 200 # HTTP status code 200 for OK
+    # Preprocess and predict
+    input_data = preprocess_image(filepath)
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
 
-# Main entry point for the Flask application.
-# This will run the development server.
+    predicted_index = int(np.argmax(output_data))
+    predicted_label = labels[predicted_index]
+    description = descriptions[predicted_label]
+
+    return jsonify({
+        "message": "Image received and processed.",
+        "prediction": predicted_label,
+        "description": description,
+        "filename": image_file.filename
+    }), 200
+
 if __name__ == '__main__':
-    # Run the app on host '0.0.0.0' to make it accessible from other devices
-    # on the network (useful for testing on different machines) and port 5000.
-    # debug=True allows for automatic reloads on code changes and provides
-    # a debugger. Set to False in production.
     app.run(host='0.0.0.0', port=5000, debug=True)
